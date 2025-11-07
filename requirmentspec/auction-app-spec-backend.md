@@ -26,14 +26,14 @@
 [API 閘道器 (API Gateway)]
 (Routing, Authentication, Aggregation)
          |
-         +----------------+----------------+----------------+
+         +----------------+----------------+----------------+----------------+
+         |                |                |                |                |
+         v                v                v                v                v
+[1. 會員服務]      [2. 商品拍賣服務]    [3. 競標服務]      [4. 通知服務]      [共用類別庫]
+(Member Service)   (Auction Service)  (Bidding Service)  (Notification Service) (Shared Library)
          |                |                |                |
          v                v                v                v
-[1. 會員服務]      [2. 商品拍賣服務]    [3. 競標服務]      [共用類別庫]
-(Member Service)   (Auction Service)  (Bidding Service)  (Shared Library)
-         |                |                |
-         v                v                v
-[會員資料庫]       [商品資料庫]       [競標資料庫]
+[會員資料庫]       [商品資料庫]       [競標資料庫]       [通知資料庫]
 ```
 
 ## 4. 核心服務與 API 設計 (Core Services & API Design)
@@ -85,6 +85,61 @@
 - **資料庫 (Bidding DB)**:
     - **Bids**: `Id`, `AuctionId`, `BidderUserId`, `Amount`, `Timestamp`.
 
+### 4.5 通知服務 (Notification Service)
+- **職責**: 作為一個獨立的背景服務，負責處理所有非同步的通知發送，包括手機推播、Email 與簡訊。
+- **運作方式**:
+    - **事件驅動**: 本服務不直接對外提供 API，而是監聽 Message Queue 中的特定事件 (如 `NewAuctionListed`, `AuctionEndingSoon`, `AuctionWinnerDetermined`)。
+    - **任務分派**: 收到事件後，根據事件類型與使用者偏好設定，決定要透過何種管道 (Push/Email/SMS) 發送通知。
+    - **整合第三方服務**: 
+        - **手機推播**: 整合 Firebase Cloud Messaging (FCM) 和 Apple Push Notification Service (APNS)。
+        - **Email**: 整合 SendGrid 或 AWS SES 等 Email 服務。
+        - **簡訊 (SMS)**: 整合 Twilio 等簡訊閘道服務。
+
+### 4.5.1 廣播情境 (Broadcast Scenarios)
+以下是通知服務可能處理的廣播與推播情境：
+- **全站公告 (Site-wide Announcement)**:
+    - **情境**: 系統維護、新功能上線、重大活動或促銷。
+    - **觸發**: 管理員手動觸發。
+    - **目標**: 所有使用者。
+- **熱門商品即將開賣 (Popular Auction Starting Soon)**:
+    - **情境**: 高關注度商品在拍賣開始前發送提醒。
+    - **觸發**: 系統自動判斷或管理員手動標記。
+    - **目標**: 所有使用者或訂閱熱門商品通知的使用者。
+- **特定類別新品上架 (New Listings in Specific Categories)**:
+    - **情境**: 使用者追蹤的商品類別有新商品上架。
+    - **觸發**: 「商品服務」發布 `NewAuctionListed` 事件。
+    - **目標**: 追蹤該類別的使用者。
+- **拍賣即將結束提醒 (Auction Ending Soon Reminder)**:
+    - **情境**: 使用者追蹤或曾出價的商品，在拍賣結束前發送提醒。
+    - **觸發**: 「商品服務」的背景排程任務發布 `AuctionEndingSoon` 事件。
+    - **目標**: 追蹤該商品或曾出價的使用者。
+- **出價被超越提醒 (Outbid Notification)**:
+    - **情境**: 使用者的出價被其他使用者超越。
+    - **觸發**: 「競標服務」發布 `Outbid` 事件。
+    - **目標**: 被超越出價的使用者。
+- **得標通知 (Auction Won Notification)**:
+    - **情境**: 使用者成功得標某件商品。
+    - **觸發**: 「商品服務」發布 `AuctionWon` 事件。
+    - **目標**: 得標使用者。
+- **商品價格變動通知 (Item Price Change Notification)**:
+    - **情境**: 賣家調整了商品的起標價或保留價。
+    - **觸發**: 「商品服務」發布 `AuctionPriceUpdated` 事件。
+    - **目標**: 追蹤該商品的使用者。
+- **個人化商品推薦 (Personalized Item Recommendations)**:
+    - **情境**: 根據使用者的行為（瀏覽、出價）推薦可能感興趣的商品。
+    - **觸發**: 推薦系統的背景排程任務發布 `PersonalizedRecommendation` 事件。
+    - **目標**: 符合推薦條件的個別使用者。
+- **支付/運送提醒 (Payment/Shipping Reminders)**:
+    - **情境**: 得標者尚未支付款項，或賣家尚未寄出商品。
+    - **觸發**: 「訂單服務」或「商品服務」的背景排程任務發布 `PaymentReminder` 或 `ShippingReminder` 事件。
+    - **目標**: 相關的得標者或賣家。
+
+- **API Endpoints (供內部或前端使用)**:
+    - `GET /api/notifications/history`: 讓使用者可以從前端查詢自己的歷史通知紀錄。
+- **資料庫 (Notification DB)**:
+    - **NotificationLogs**: `Id`, `UserId`, `Channel` (Push/Email/SMS), `Content`, `Status` (Sent/Failed), `Timestamp`。
+    - **NotificationTemplates**: `TemplateName`, `Channel`, `ContentTemplate`。
+
 ## 5. 服務間通訊範例
 - **查詢商品與賣家資訊**:
     1. 客戶端向 API 閘道器請求 `GET /api/auctions/{id}`。
@@ -94,10 +149,11 @@
     5. 「會員服務」回傳賣家的公開資訊 (如暱稱)。
     6. 「商品服務」組合商品與賣家資訊後，回傳給閘道器，最終回到客戶端。
 
-- **競標結束 (非同步)**:
-    1. 「商品服務」中某個背景作業偵測到拍賣時間已到。
-    2. 「商品服務」發布一個 `AuctionEnded` 事件到 Message Queue，內容包含 `AuctionId` 和 `WinnerUserId`。
-    3. 「競標服務」與「通知服務」(如果有的話) 訂閱此事件，並各自進行後續處理 (更新最終狀態、發送得標通知等)。
+- **新商品上架通知 (非同步)**:
+    1. 「商品服務」成功建立一筆新商品。
+    2. 「商品服務」發布一個 `NewAuctionListed` 事件到 Message Queue，內容包含 `AuctionId` 與商品基本資訊。
+    3. 「通知服務」監聽到此事件，從「會員服務」取得有訂閱此類通知的使用者列表。
+    4. 「通知服務」根據使用者偏好，透過 FCM/APNS、SendGrid 等服務，將新商品通知發送給目標使用者。
 
 ## 6. 共用程式碼
 - 建立一個共用的類別庫專案 (`Auction.Shared.csproj`)，用於存放跨服務的 DTOs、Enums、和工具類。此專案會被打包成私有的 NuGet 套件供所有服務使用，以確保一致性。
